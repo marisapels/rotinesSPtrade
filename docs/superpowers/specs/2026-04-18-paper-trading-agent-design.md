@@ -15,7 +15,7 @@ Build an autonomous, scheduled agent that trades the S&P 500 on **Alpaca paper**
 - Run unattended on a fixed cron (pre-market, post-close, weekly Fri close, monthly 1st).
 - Produce a complete audit trail in git (state + journal + AAR).
 - Notify the user in Telegram at every lifecycle event.
-- Expose a static-HTML dashboard (GitHub Pages) refreshed on every run.
+- Expose a static-HTML dashboard (served by nginx on the VPS over HTTPS) refreshed on every run.
 - Provide well-defined Claude seams for narrative, review, and strategy-update PRs, but never let Claude write orders or move stops.
 - Flip to **live** capital by changing `ALPACA_BASE_URL` and halving the risk constant — no code rewrite.
 
@@ -24,7 +24,7 @@ Build an autonomous, scheduled agent that trades the S&P 500 on **Alpaca paper**
 - **Full backtest & walk-forward engine** (STRATEGY.md §8.1–§8.5). A stubbed interface is included so the §8.7 gate exists; the real engine is a follow-up spec.
 - **Live-capital switch.** Documented procedure only; no live trading is enabled by this spec.
 - **Multi-account, multi-strategy, multi-instrument generalization.** One account, SPY + SH, one Elder method.
-- **Sub-minute streaming dashboard.** 15-min fill-watcher polling is the live granularity. A future spec can add a websocket consumer if needed.
+- **Sub-minute streaming dashboard.** 2-min fill-watcher polling is the live granularity. A future spec can add an Alpaca trade-updates websocket systemd service if the 2-min delay ever feels too slow.
 
 ## 3. Decisions (from brainstorming)
 
@@ -33,42 +33,52 @@ Build an autonomous, scheduled agent that trades the S&P 500 on **Alpaca paper**
 | Scope stage | Paper-trading agent; backtest deferred | User intends to paper-first, flip to live later |
 | Autonomy | **Full auto** on paper | Paper is the test of unattended operation |
 | Claude's role | **Operator / reviewer / strategy-updater** | Rules mechanical in code; Claude adds judgement at defined seams |
-| Runtime | **GitHub Actions cron** | Reliable, laptop-independent, free, git-native audit |
+| Runtime | **Hetzner VPS (CX11 / CX22, €~5/mo) + systemd-timer** | Real (not best-effort) cron, persistent disk for state, SSH control, live-capital-ready. GitHub Actions remains only for PR CI. |
 | Language | **Python 3.11** | Industry default for quant; `alpaca-py`, `pandas` |
-| Dashboard | **Static HTML → GitHub Pages**, regenerated per run | Zero infra, bookmarkable, matches run cadence |
+| Dashboard | **Static HTML served by nginx on the VPS** (engine writes to `/var/www/trader/`), HTTPS via Let's Encrypt, optional HTTP basic-auth | Co-located with engine, live updates without push latency, no external hosting |
 | Notifications | **Telegram Bot API** from every lifecycle event | Push to phone, no infra |
-| Live-data granularity between scheduled runs | **15-min fill-watcher** poller (09:30–16:00 ET, M–F) | Good enough for swing system; no VPS required |
+| Live-data granularity between scheduled runs | **2-min fill-watcher** systemd timer (09:30–16:00 ET, M–F) | Cheap (one VPS already there); tight enough that any fill shows up in Telegram within ~2 min. Alpaca trade-updates websocket is a future upgrade path, not MVP. |
 
 ## 4. Architecture
 
-A single Python package `spy_trader/` implements the engine as a collection of small, pure, independently testable modules. Scheduled runs are CLI invocations (`python -m spy_trader.cron <routine>`) triggered by GitHub Actions cron workflows. The engine reads state from JSON files, talks to Alpaca via a thin typed wrapper, writes journal entries and AARs as markdown, emits Telegram events, regenerates the static dashboard, and commits everything to git.
+A single Python package `spy_trader/` implements the engine as a collection of small, pure, independently testable modules. The runtime is a small Hetzner Cloud VPS (CX11 / CX22, Ubuntu LTS, ~€5/mo, timezone set to `America/New_York` so systemd `OnCalendar=` uses ET directly). Scheduled runs are CLI invocations (`/opt/trader/.venv/bin/python -m spy_trader.cron <routine>`) triggered by `systemd` timers — real, not best-effort, cron.
+
+The engine reads state from JSON on a persistent disk (`/var/lib/trader/`), talks to Alpaca via a thin typed wrapper, writes journal entries and AARs as markdown (pushed to git for audit after each routine), emits Telegram events, regenerates the static HTML dashboard under `/var/www/trader/` (served by nginx over HTTPS with Let's Encrypt), and logs to `journald`.
 
 Claude is invoked via the Anthropic Python SDK at four defined seams (pre-market review, daily AAR, weekly rollup, monthly review + strategy-update PR) and **never** at any seam that touches orders, stops, state transitions, or risk math.
 
+GitHub Actions stays in the picture for one job only: running unit + integration tests on every PR. No production traffic runs on GH Actions.
+
 ```
-  ┌──────────────────┐   ┌────────────────────┐
-  │ GitHub Actions   │──▶│ spy_trader.cron     │
-  │ cron workflows   │   │ routine dispatcher  │
-  └──────────────────┘   └──────────┬──────────┘
-                                    │
-        ┌──────────┬───────────────┼────────────┬─────────────┐
-        ▼          ▼               ▼            ▼             ▼
-     data/      indicators/     screens/    orders/       state/
-     cache      (pure fns)      (pure fns)  (business)    (JSON)
-        │          │               │            │             │
-        └──────────┴───────┬───────┴────────────┘             │
-                           ▼                                   │
-                    ┌─────────────┐       ┌──────────────────┐ │
-                    │ alpaca_client│◀────▶│ Alpaca Paper API  │ │
-                    └─────────────┘       └──────────────────┘ │
-                                                               │
-  ┌──────────┐   ┌───────────┐   ┌─────────────┐  ┌──────────┐ │
-  │ journal/ │   │ notifier/ │   │ dashboard/  │  │ claude_  │ │
-  │ (md)     │   │ (Telegram)│   │ docs/site/  │  │ review/  │ │
-  └────┬─────┘   └─────┬─────┘   └──────┬──────┘  └────┬─────┘ │
-       └───────────────┴────────────────┴──────────────┴───────┘
-                           ▼
-                   git commit & push (audit trail)
+    ┌────────────────────────────── Hetzner VPS (Ubuntu LTS, TZ=America/New_York) ───────────────────────────────┐
+    │                                                                                                             │
+    │  ┌─────────────────┐   ┌──────────────────────┐                                                             │
+    │  │ systemd timers  │──▶│ spy_trader.cron      │                                                             │
+    │  │ (pre_market,    │   │ routine dispatcher   │                                                             │
+    │  │  post_close,    │   └──────────┬───────────┘                                                             │
+    │  │  weekly,        │              │                                                                         │
+    │  │  monthly,       │              ▼                                                                         │
+    │  │  fill_watcher)  │   ┌──────────────────────┐        ┌───────────────────┐                                │
+    │  └─────────────────┘   │ deterministic engine │◀──────▶│ Alpaca Paper API  │                                │
+    │                        │ indicators/screens/  │        └───────────────────┘                                │
+    │                        │ sizing/risk/orders/  │                                                             │
+    │                        │ state/journal        │        ┌───────────────────┐                                │
+    │                        └──┬────────┬──────┬───┘──────▶ │ Anthropic API     │                                │
+    │                           │        │      │            └───────────────────┘                                │
+    │                           ▼        ▼      ▼            ┌───────────────────┐                                │
+    │                      /var/lib/  journal/  dashboard  ──▶ Telegram Bot API │                                │
+    │                      trader/    (git push) (/var/www/  └───────────────────┘                                │
+    │                      state.json           trader/)                                                           │
+    │                                                                                                             │
+    │  ┌───────────────┐                                                                                          │
+    │  │ nginx + TLS   │◀── HTTPS ── user browser (dashboard)                                                     │
+    │  └───────────────┘                                                                                          │
+    │                                                                                                             │
+    └────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+                                       │
+                                       ▼
+                              GitHub (audit trail via
+                              journal / AAR commits)
 ```
 
 ## 5. Repository layout
@@ -82,13 +92,27 @@ Claude is invoked via the Anthropic Python SDK at four defined seams (pre-market
 ├── .env.example                       # ALPACA_*, ANTHROPIC_API_KEY, TELEGRAM_*
 ├── .github/
 │   └── workflows/
-│       ├── pre_market.yml             # Mon–Fri 09:15 ET
-│       ├── post_close.yml             # Mon–Fri 16:15 ET
-│       ├── weekly.yml                 # Fri 16:30 ET
-│       ├── monthly.yml                # 1st of month 09:00 ET
-│       ├── fill_watcher.yml           # Every 15 min, 09:30–16:00 ET, M–F
-│       ├── pages.yml                  # Publish docs/site/ to GitHub Pages
-│       └── ci.yml                     # Unit + integration tests on PR
+│       └── ci.yml                     # Unit + integration tests on PR (only thing GH Actions runs for this project)
+│
+├── deploy/
+│   ├── systemd/
+│   │   ├── trader-pre-market.service
+│   │   ├── trader-pre-market.timer    # OnCalendar: Mon-Fri 09:15 America/New_York
+│   │   ├── trader-post-close.service
+│   │   ├── trader-post-close.timer    # OnCalendar: Mon-Fri 16:15 America/New_York
+│   │   ├── trader-weekly.service
+│   │   ├── trader-weekly.timer        # OnCalendar: Fri 16:30 America/New_York
+│   │   ├── trader-monthly.service
+│   │   ├── trader-monthly.timer       # OnCalendar: *-*-01 09:00 America/New_York
+│   │   ├── trader-fill-watcher.service
+│   │   └── trader-fill-watcher.timer  # OnCalendar: Mon-Fri *:*/2 (engine self-skips outside 09:30–16:00 ET)
+│   ├── nginx/
+│   │   └── trader.conf                # server block, dashboard location, basic-auth
+│   ├── scripts/
+│   │   ├── bootstrap.sh               # initial server provisioning (idempotent)
+│   │   ├── deploy.sh                  # git pull + uv sync + systemctl reload
+│   │   └── rollback.sh                # revert to previous known-good tag
+│   └── README.md                      # step-by-step server setup
 │
 ├── spy_trader/
 │   ├── __init__.py
@@ -118,7 +142,7 @@ Claude is invoked via the Anthropic Python SDK at four defined seams (pre-market
 │   ├── claude_review.py               # Anthropic SDK calls at 4 seams
 │   ├── notifier.py                    # Telegram Bot API wrapper
 │   ├── events.py                      # Event dataclasses + dispatcher
-│   ├── dashboard.py                   # Render docs/site/index.html
+│   ├── dashboard.py                   # Render /var/www/trader/index.html (Jinja)
 │   └── fill_watcher.py                # Intraday poller
 │
 ├── tests/
@@ -135,14 +159,7 @@ Claude is invoked via the Anthropic Python SDK at four defined seams (pre-market
 │   ├── notifier/                      # Telegram payload shape, mocked HTTP
 │   └── integration/                   # full pre-market + post-close replay
 │
-├── state/
-│   ├── state.json                     # positions, candidates, trading_disabled, schema_version
-│   ├── month.json                     # month_start_equity, MTD drawdown
-│   └── cache/
-│       ├── spy_daily.parquet
-│       └── sh_daily.parquet
-│
-├── journal/
+├── journal/                           # committed to git — the audit trail
 │   ├── YYYY/MM/
 │   │   ├── trades.md                  # §6 entries
 │   │   ├── aar/
@@ -154,14 +171,37 @@ Claude is invoked via the Anthropic Python SDK at four defined seams (pre-market
 │   └── incidents/
 │       └── YYYY-MM-DD-<slug>.md
 │
+├── fixtures/                          # for local dev / tests only; real state lives on VPS
+│   └── sample_state.json
+│
 ├── docs/
-│   ├── superpowers/specs/
-│   │   └── 2026-04-18-paper-trading-agent-design.md   # this file
-│   └── site/                          # GitHub Pages root
-│       ├── index.html                 # regenerated per run
-│       ├── events.jsonl               # audit feed for dashboard + Telegram mirror
-│       └── assets/style.css
+│   └── superpowers/specs/
+│       └── 2026-04-18-paper-trading-agent-design.md   # this file
+│
+├── dashboard_template/                # Jinja templates + CSS checked into git
+│   ├── index.html.j2                  # rendered per run to /var/www/trader/index.html
+│   └── assets/style.css               # copied to /var/www/trader/assets/ at deploy
 ```
+
+### 5.1 On-server layout (Hetzner VPS)
+
+| Path | Purpose | In git? |
+|---|---|---|
+| `/opt/trader/` | git clone of this repo; code + journal live here | yes (journal subtree pushed after every routine) |
+| `/opt/trader/.venv/` | uv-managed virtualenv, Python 3.11 | no |
+| `/var/lib/trader/state/state.json` | live engine state (positions, candidates, flags) | **no** (too noisy for git) |
+| `/var/lib/trader/state/month.json` | month equity + drawdown | no |
+| `/var/lib/trader/cache/*.parquet` | OHLCV cache | no |
+| `/var/www/trader/index.html` | dashboard (served by nginx) | no (regenerated every run) |
+| `/var/www/trader/events.jsonl` | audit feed read by dashboard | no |
+| `/var/log/trader/*.log` | structured logs (also mirrored to journald) | no |
+| `/etc/trader/env` | secrets (mode 0600, owner `trader`) | **never** |
+| `/etc/systemd/system/trader-*.{timer,service}` | systemd units | templated from `deploy/systemd/` |
+| `/etc/nginx/sites-available/trader.conf` | nginx site | templated from `deploy/nginx/` |
+
+**Users / permissions.** A dedicated `trader` user owns `/opt/trader`, `/var/lib/trader`, `/var/www/trader`, `/var/log/trader`, `/etc/trader`. Systemd units run `User=trader`. No sudo needed at runtime. SSH access restricted to key-auth, root login disabled, ufw allows only 22 / 80 / 443.
+
+**Backups.** `/var/lib/trader/` snapshotted daily to Hetzner Storage Box or restic-to-B2 (the journal already lives in GitHub, so only state + cache need backing up). Recovery = restore snapshot + `git pull` in `/opt/trader/` + `systemctl start trader-*.timer`.
 
 ## 6. Runtime flows
 
@@ -179,7 +219,7 @@ Claude is invoked via the Anthropic Python SDK at four defined seams (pre-market
 10. **Expire stale.** Cancel any buy-stop > 3 trading days old; emit `buy_stop_expired`.
 11. **Pre-market note.** Write `journal/YYYY/MM/pre_market/YYYY-MM-DD.md` with the §9 checklist outcome, candidates, planned orders, heat, MTD drawdown, and econ-calendar hits.
 12. **Claude review (seam #1).** Pass the pre-market note + econ-calendar JSON (from `calendar_feed.py`) + STRATEGY.md (cached prompt). Claude returns `{verdict: "go"|"veto-new-entries"|"halt", reason}`. If `veto-new-entries`, cancel any newly-placed buy-stops from step 9 and emit `candidate_skipped{reason=claude_veto}` for each. If `halt`, additionally set `trading_disabled=true`.
-13. **Dashboard.** Regenerate `docs/site/index.html`.
+13. **Dashboard.** Regenerate `/var/www/trader/index.html` from Jinja templates.
 14. **Close.** Emit `claude_review` and `session_ended` with one-line summary + dashboard link.
 15. **Git.** Commit all state/journal/dashboard changes with message `pre-market YYYY-MM-DD`; push.
 
@@ -199,8 +239,9 @@ Claude is invoked via the Anthropic Python SDK at four defined seams (pre-market
 5. **Equity & drawdown.** Read Alpaca account equity; update `month.json`. If MTD drawdown ≥ 6% and not already tripped, emit `circuit_breaker_tripped`.
 6. **Open-risk summary.** Sum `(entry − stop) × shares` across positions; emit in `reconciliation`.
 7. **Claude AAR (seam #2).** Call Claude with the day's events, trade log, state diff, rule-break candidates. Claude writes `journal/.../aar/YYYY-MM-DD.md` per §7 template and produces a structured `rule_breaks` array; any non-empty array emits `incident` events.
-8. **Dashboard** regenerated. **Git** commit + push.
-9. Emit `session_ended`.
+8. **Dashboard** regenerated.
+9. **Archive events.** Move today's `/var/www/trader/events.jsonl` into `journal/YYYY/MM/events/YYYY-MM-DD.jsonl` (keep the live file empty for tomorrow). Then **git commit + push** all journal changes from today (trades, AAR, pre-market note, events archive, incidents if any).
+10. Emit `session_ended`.
 
 ### 6.3 Weekly (Fri 16:30 ET)
 
@@ -218,17 +259,20 @@ Claude is invoked via the Anthropic Python SDK at four defined seams (pre-market
 2. Tally last month: realized R sum, win rate, avg winner R, avg loser R, max daily drawdown, circuit-breaker fires.
 3. Write `month-YYYY-MM.json` (structured metrics) and snapshot.
 4. Reset `month_start_equity` to current equity.
-5. **Claude monthly review (seam #4).** Reads metrics + STRATEGY.md. Writes `month-YYYY-MM.md` comparing vs §8.5 thresholds. If Claude proposes a STRATEGY.md change, it opens a git branch `strategy-update/YYYY-MM-<slug>`, commits the diff, opens a PR with body citing §8.7, and labels it `regression-required`. CI blocks merge until a `backtest_gate.json` updated-at date is newer than the PR base commit (stub enforced now; real backtest fills it later).
+5. **Claude monthly review (seam #4).** Reads metrics + STRATEGY.md. Writes `month-YYYY-MM.md` comparing vs §8.5 thresholds. If Claude proposes a STRATEGY.md change, the engine creates a git branch `strategy-update/YYYY-MM-<slug>`, commits the diff, pushes, and opens a PR via `gh pr create` (GitHub PAT in `/etc/trader/env` as `GITHUB_TOKEN`). PR body cites §8.7 and the `regression-required` label is applied. The GH Actions CI `regression-guard` job (see §14) blocks merge until `state/backtest_gate.json` `updated_at` is newer than the PR base commit (stub enforced now; real backtest fills it later).
 6. Dashboard + git + `session_ended`.
 
-### 6.5 Fill-watcher (every 15 min, 09:30–16:00 ET, M–F)
+### 6.5 Fill-watcher (every 2 min, systemd timer, 09:30–16:00 ET, M–F)
 
-1. Light routine: fetch `orders since last_seen_id` from Alpaca.
-2. For each new filled / canceled / expired order, emit the corresponding event.
-3. Do **not** modify state.json (post-close owns authoritative reconciliation).
-4. Do **not** call Claude.
-5. Regenerate dashboard `recent_events` section only.
-6. Git commit (`fill-watcher HH:MM ET`) + push.
+The systemd timer fires every 2 minutes Mon–Fri; the engine self-skips outside 09:30–16:00 ET by reading `spy_trader.clock.is_market_open()` as the first step.
+
+1. Check clock — if market closed, exit 0 immediately. (Keeps the timer simple and avoids two separate calendars.)
+2. Fetch `orders since last_seen_order_id` from Alpaca.
+3. For each new filled / canceled / expired order, emit the corresponding Telegram event and append to `/var/www/trader/events.jsonl`.
+4. Do **not** modify `state.json` (post-close owns authoritative reconciliation — fill-watcher is read-only against state).
+5. Do **not** call Claude.
+6. Regenerate only the "Recent events" panel of the dashboard (fast path — no full rebuild).
+7. No git commit — the fill-watcher is a high-frequency read-only loop. Today's `events.jsonl` is archived to `journal/YYYY/MM/events/YYYY-MM-DD.jsonl` and committed once per day by the post-close routine (§6.2 step 9).
 
 ### 6.6 Incident (any unhandled exception in any routine)
 
@@ -236,7 +280,7 @@ Claude is invoked via the Anthropic Python SDK at four defined seams (pre-market
 2. Write `journal/incidents/YYYY-MM-DD-<slug>.md` with traceback + routine + state snapshot.
 3. Set `state.trading_disabled = true`.
 4. Emit `incident` Telegram event with file link.
-5. Exit nonzero so GitHub Actions marks the run failed (red check, visible email).
+5. Exit nonzero so `systemd` logs a unit failure. The companion `OnFailure=trader-incident-notify.service` drop-in sends a second Telegram message with the `systemctl status` excerpt (defence-in-depth against a notifier crash).
 6. Human clears by committing `state.json` with `trading_disabled=false` after investigation.
 
 ## 7. Claude seams (explicit contracts)
@@ -258,7 +302,7 @@ All SDK calls use **prompt caching** on STRATEGY.md as a stable system prompt (S
 
 ## 8. Notifications (Telegram event catalogue)
 
-All events go through `spy_trader.events.Event` and `spy_trader.notifier.send`. Each event is also appended to `docs/site/events.jsonl` (dashboard audit feed). Message format: one-line headline + two-line body; markdown-v2 disabled to avoid escaping.
+All events go through `spy_trader.events.Event` and `spy_trader.notifier.send`. Each event is also appended to `/var/www/trader/events.jsonl` (read by the dashboard; rotated into `journal/YYYY/MM/events/YYYY-MM-DD.jsonl` and committed once per day by post-close). Message format: one-line headline + two-line body; Telegram markdown-v2 disabled to avoid escaping.
 
 | Event | Emitted when | Body example |
 |---|---|---|
@@ -285,7 +329,7 @@ All events go through `spy_trader.events.Event` and `spy_trader.notifier.send`. 
 
 ## 9. Dashboard
 
-Static HTML at `docs/site/index.html`, published to GitHub Pages via `.github/workflows/pages.yml`. Regenerated by `spy_trader.dashboard.render()` at the end of every routine and every fill-watcher tick. Panels:
+Static HTML at `/var/www/trader/index.html` on the VPS, served by nginx over HTTPS (Let's Encrypt) at a domain of the user's choice (e.g. `trader.yourdomain.com`). HTTP basic-auth in front (credentials in `/etc/trader/env`) because the page exposes account equity and positions. Regenerated by `spy_trader.dashboard.render()` at the end of every scheduled routine and every fill-watcher tick (the fill-watcher only rewrites the "Recent events" panel — fast path). Panels:
 
 1. **Header.** Last-updated timestamp (ET + user-local) + routine that produced it.
 2. **Tide.** Large badge (UP / DOWN / FLAT) + weekly EMA / MACD values.
@@ -433,36 +477,44 @@ Changing any of these above defaults requires updating STRATEGY.md first, which 
 
 When the §8 paper-trade gate (3 months or 20 trades, plus backtest acceptance) is passed:
 
-1. Change `ALPACA_BASE_URL` secret from `https://paper-api.alpaca.markets` to `https://api.alpaca.markets`.
-2. Set `RISK_FRACTION=0.01` in `config.py` for the first calendar month live.
-3. Update STRATEGY.md rule-card if desired; triggers §8.7.
-4. No other code changes.
+1. On the VPS, edit `/etc/trader/env`: set `ALPACA_BASE_URL=https://api.alpaca.markets` and swap `ALPACA_API_KEY` / `ALPACA_API_SECRET` to live-account credentials.
+2. Set `RISK_FRACTION=0.01` in `spy_trader/config.py` (or override in `/etc/trader/env`) for the first calendar month live.
+3. Update STRATEGY.md rule-card if desired; triggers §8.7 regression requirement.
+4. `sudo systemctl restart 'trader-*.timer'`. No code changes required.
 
 ## 16. Required secrets
 
-| Name | Purpose | Where |
-|---|---|---|
-| `ALPACA_API_KEY` | Alpaca paper API key | GH Actions secrets |
-| `ALPACA_API_SECRET` | Alpaca paper API secret | GH Actions secrets |
-| `ALPACA_BASE_URL` | `https://paper-api.alpaca.markets` | GH Actions vars |
-| `ANTHROPIC_API_KEY` | Claude seams | GH Actions secrets |
-| `TELEGRAM_BOT_TOKEN` | Telegram Bot API | GH Actions secrets |
-| `TELEGRAM_CHAT_ID` | Target chat for notifications | GH Actions secrets |
+Stored in `/etc/trader/env` on the VPS (mode 0600, owner `trader`), loaded by every systemd unit via `EnvironmentFile=`:
 
-Local dev uses `.env` (gitignored) mirroring the same names.
+| Name | Purpose |
+|---|---|
+| `ALPACA_API_KEY` | Alpaca paper API key |
+| `ALPACA_API_SECRET` | Alpaca paper API secret |
+| `ALPACA_BASE_URL` | `https://paper-api.alpaca.markets` (flip to `https://api.alpaca.markets` at §15) |
+| `ANTHROPIC_API_KEY` | Claude seams |
+| `TELEGRAM_BOT_TOKEN` | Telegram Bot API |
+| `TELEGRAM_CHAT_ID` | Target chat for notifications |
+| `DASHBOARD_BASIC_AUTH_USER` | HTTP basic-auth for nginx |
+| `DASHBOARD_BASIC_AUTH_PASSWORD` | (set via `htpasswd` into `/etc/nginx/.htpasswd-trader`; the engine never reads this) |
+| `GITHUB_TOKEN` | Fine-grained PAT, scoped to this repo, permissions: `contents:write`, `pull-requests:write`. Used by post-close `git push` and monthly strategy-PR drafter. |
+| `RISK_FRACTION` | (optional override; default `0.02`) |
+
+**Never committed to git.** `.env.example` in the repo documents the names. Local dev uses `.env` (gitignored) mirroring the same names. Production uses `/etc/trader/env`. GitHub Actions CI injects a minimal mocked env; no real secrets needed for unit + integration tests.
 
 ## 17. Implementation phases (high level, for the plan)
 
-1. **Bootstrap repo.** `pyproject.toml`, tooling, CI skeleton, `.env.example`, directory scaffolding.
-2. **Deterministic core.** Indicators → screens → sizing → risk, all pure + fully unit tested.
-3. **Alpaca + state.** `alpaca_client.py`, `state.py`, `data.py`, minimal order wiring with mocks.
-4. **Orders + journal.** `orders.py`, `journal.py` (§6 template); post-close fill reconciliation.
-5. **Notifier + events.** Telegram wrapper, event catalogue, `events.jsonl` audit feed.
-6. **Dashboard.** `dashboard.render()` + Pages workflow.
-7. **Claude seams.** Pre-market review, AAR, weekly, monthly + strategy PR drafter.
-8. **Cron wiring.** All GitHub Actions workflows, secret provisioning docs, regression guard.
-9. **Paper dry-run.** Manual trigger, observe one simulated pre-market + post-close cycle end-to-end.
-10. **Go live on Alpaca paper.** Enable cron schedules; start §8.6 3-month / 20-trade paper trial.
+1. **Bootstrap repo.** `pyproject.toml` (uv), tooling, CI skeleton (PR unit+integration only), `.env.example`, directory scaffolding, `Makefile` targets.
+2. **Deterministic core.** Indicators → screens → sizing → risk, all pure + fully unit tested against fixtures. No I/O.
+3. **Alpaca + state.** `alpaca_client.py` typed wrapper, `state.py` atomic JSON, `data.py` parquet cache, `clock.py` ET helpers + trading calendar. Integration tests use recorded responses.
+4. **Orders + journal.** `orders.py` plan-and-execute (buy-stops, initial stops, breakeven, SafeZone trail, channel target, time stop, tide-flip exit), `journal.py` §6 writer.
+5. **Notifier + events.** `events.py` dataclasses + dispatcher, `notifier.py` Telegram wrapper with retry, `events.jsonl` audit feed.
+6. **Dashboard.** `dashboard.render()` Jinja templates; static files to `/var/www/trader/`.
+7. **Claude seams.** Pre-market review, daily AAR, weekly rollup, monthly review + strategy-PR drafter (Anthropic SDK with prompt caching on STRATEGY.md).
+8. **Cron dispatcher.** `cron.py`, `cli.py` argparse, incident handler, regression-guard CI job.
+9. **Server bootstrap.** `deploy/scripts/bootstrap.sh` — provisions Hetzner VPS (idempotent): user `trader`, ufw, unattended-upgrades, Python 3.11 via uv, nginx + Let's Encrypt, systemd unit install, secrets file scaffolding, backup cron. Run against a fresh CX22 box.
+10. **Deploy pipeline.** `deploy/scripts/deploy.sh` (git pull → `uv sync` → `systemctl daemon-reload` → `systemctl restart trader-*.timer`); `rollback.sh`.
+11. **Paper dry-run.** Manual `systemctl start trader-pre-market.service` + `trader-post-close.service`; observe one end-to-end cycle with mock account; confirm Telegram + dashboard + git commit.
+12. **Enable timers.** `systemctl enable --now trader-*.timer`; start §8.6 3-month / 20-trade paper trial.
 
 The writing-plans skill will take this phasing and expand it into concrete, testable tasks.
 
