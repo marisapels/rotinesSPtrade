@@ -73,7 +73,7 @@ jobs:
 
       - name: Export deploy image tag
         id: export
-        run: echo "image_tag=${IMAGE_NAME}:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+        run: echo "image_tag=${IMAGE_NAME}:sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
   deploy:
     runs-on: ubuntu-latest
