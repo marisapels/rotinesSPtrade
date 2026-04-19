@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>spy-trader</title>
+    <link rel="stylesheet" href="./assets/style.css">
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero">
+        <p class="eyebrow">Paper Trading Agent</p>
+        <h1>{{ state.tide|upper }} Tide</h1>
+        <p>{{ context.summary or "Deterministic Elder Triple Screen runner" }}</p>
+      </section>
+      <section class="grid">
+        <article class="card">
+          <h2>Status</h2>
+          <p>Trading disabled: {{ state.trading_disabled }}</p>
+          <p>Pending orders: {{ state.pending_orders|length }}</p>
+          <p>Open positions: {{ state.positions|length }}</p>
+        </article>
+        <article class="card">
+          <h2>Month</h2>
+          {% if state.month %}
+          <p>Start: {{ state.month.month_start }}</p>
+          <p>Start equity: {{ state.month.month_start_equity }}</p>
+          <p>Min equity: {{ state.month.min_equity_so_far }}</p>
+          {% else %}
+          <p>No month snapshot yet.</p>
+          {% endif %}
+        </article>
+      </section>
+    </main>
+  </body>
+  </html>

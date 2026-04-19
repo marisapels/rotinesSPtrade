@@ -1,0 +1,53 @@
+:root {
+  --bg: #f3eee2;
+  --ink: #10212b;
+  --accent: #b24c2f;
+  --card: rgba(255, 255, 255, 0.78);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at top left, rgba(178, 76, 47, 0.18), transparent 35%),
+    linear-gradient(135deg, #f7f2e8, var(--bg));
+  font-family: Georgia, "Times New Roman", serif;
+}
+
+.page {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 48px 24px 64px;
+}
+
+.hero h1 {
+  margin: 0;
+  font-size: clamp(2.5rem, 7vw, 4.5rem);
+}
+
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--accent);
+  font-size: 0.8rem;
+}
+
+.grid {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  margin-top: 32px;
+}
+
+.card {
+  padding: 24px;
+  border-radius: 24px;
+  background: var(--card);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 20px 50px rgba(16, 33, 43, 0.08);
+}

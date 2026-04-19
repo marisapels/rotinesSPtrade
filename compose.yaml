@@ -1,0 +1,50 @@
+services:
+  trader:
+    image: ${TRADER_IMAGE:-ghcr.io/marisapels/rotinessptrade:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      STATE_DIR: /app/state
+      CACHE_DIR: /app/state/cache
+      JOURNAL_DIR: /app/journal
+      DASHBOARD_DIR: /app/var/www/trader
+      TZ: America/New_York
+    volumes:
+      - ./state:/app/state
+      - ./journal:/app/journal
+      - ./var/www/trader:/app/var/www/trader
+    command: ["--help"]
+
+  scheduler:
+    image: ${TRADER_IMAGE:-ghcr.io/marisapels/rotinessptrade:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      STATE_DIR: /app/state
+      CACHE_DIR: /app/state/cache
+      JOURNAL_DIR: /app/journal
+      DASHBOARD_DIR: /app/var/www/trader
+      TZ: America/New_York
+    volumes:
+      - ./state:/app/state
+      - ./journal:/app/journal
+      - ./var/www/trader:/app/var/www/trader
+    entrypoint: ["/app/docker/cron/start-cron.sh"]
+    restart: unless-stopped
+
+  dashboard:
+    image: nginx:1.27-alpine
+    depends_on:
+      - scheduler
+    ports:
+      - "8080:80"
+    volumes:
+      - ./var/www/trader:/usr/share/nginx/html:ro
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped

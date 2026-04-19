@@ -1,0 +1,10 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CRON_TZ=America/New_York
+
+15 9 * * 1-5 root . /etc/spy-trader.env && cd /app && /app/.venv/bin/python -m spy_trader.cli pre-market >> /proc/1/fd/1 2>> /proc/1/fd/2
+*/2 9-15 * * 1-5 root . /etc/spy-trader.env && cd /app && /app/.venv/bin/python -m spy_trader.cli fill-watcher >> /proc/1/fd/1 2>> /proc/1/fd/2
+0 16 * * 1-5 root . /etc/spy-trader.env && cd /app && /app/.venv/bin/python -m spy_trader.cli fill-watcher >> /proc/1/fd/1 2>> /proc/1/fd/2
+15 16 * * 1-5 root . /etc/spy-trader.env && cd /app && /app/.venv/bin/python -m spy_trader.cli post-close >> /proc/1/fd/1 2>> /proc/1/fd/2
+30 16 * * 5 root . /etc/spy-trader.env && cd /app && /app/.venv/bin/python -m spy_trader.cli weekly >> /proc/1/fd/1 2>> /proc/1/fd/2
+0 9 1 * * root . /etc/spy-trader.env && cd /app && /app/.venv/bin/python -m spy_trader.cli monthly >> /proc/1/fd/1 2>> /proc/1/fd/2

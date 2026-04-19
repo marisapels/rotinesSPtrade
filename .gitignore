@@ -14,5 +14,7 @@ build/
 
 # runtime artefacts (live on VPS in /var/lib/trader/, never committed)
 state/
+journal/
+var/
 !fixtures/
 !tests/fixtures/
