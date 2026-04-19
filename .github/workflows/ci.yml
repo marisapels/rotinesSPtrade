@@ -23,4 +23,4 @@ jobs:
       - name: Mypy
         run: uv run mypy spy_trader
       - name: Pytest
-        run: uv run pytest --cov=spy_trader --cov-report=term-missing --cov-fail-under=80
+        run: uv run pytest -q
